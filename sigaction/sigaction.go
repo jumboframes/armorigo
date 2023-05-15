@@ -13,7 +13,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/singchia/armorigo/log"
+	"github.com/jumboframes/armorigo/log"
 )
 
 var (

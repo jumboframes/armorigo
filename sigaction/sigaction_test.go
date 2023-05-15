@@ -24,7 +24,6 @@ func TestSignal(t *testing.T) {
 		fmt.Println("sub routine quit")
 	}()
 
-	ReservedFiniSignal = syscall.SIGTERM
 	sig := NewSignal(OptionSignalCancel(cancel))
 	sig.Add(syscall.SIGINT, foo)
 	sig.Wait(ctx)
