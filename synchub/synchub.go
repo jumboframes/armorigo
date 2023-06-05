@@ -3,145 +3,304 @@ package synchub
 import (
 	"errors"
 	"sync"
+	"time"
 
-	"github.com/jumboframes/armorigo/log"
-
-	"github.com/singchia/go-timer"
+	"github.com/singchia/go-timer/v2"
 )
 
 var (
-	ErrTimeout     = errors.New("timeout")
-	ErrNotfound    = errors.New("not found")
-	ErrForceClosed = errors.New("force closed")
+	ErrTimeout         = errors.New("timeout")
+	ErrNotfound        = errors.New("not found")
+	ErrForceClosed     = errors.New("force closed")
+	ErrClosed          = errors.New("synchub closed")
+	ErrTimerNotWorking = errors.New("timer not working")
+	ErrIDResynced      = errors.New("id resynced")
+)
+
+// A Sync presents the handler of a synchronize.
+type Sync interface {
+	C() <-chan *Event
+	Cancel() bool
+	Done() bool
+	Ack(ack interface{}) bool
+	Error(err error) bool
+}
+
+type Event struct {
+	SyncID, Data, Ack interface{}
+	Error             error
+}
+
+type synchronize struct {
+	sh           *SyncHub
+	syncID, data interface{}
+
+	// sync method
+	cb func(*Event)
+	ch chan *Event
+
+	timeout time.Duration
+	tick    timer.Tick
+}
+
+func (ec *synchronize) C() <-chan *Event {
+	return ec.ch
+}
+
+func (ec *synchronize) Cancel() bool {
+	return ec.sh.Cancel(ec.syncID)
+}
+
+func (ec *synchronize) Done() bool {
+	return ec.sh.Done(ec.syncID)
+}
+
+func (ec *synchronize) Ack(ack interface{}) bool {
+	return ec.sh.Ack(ec.syncID, ack)
+}
+
+func (ec *synchronize) Error(err error) bool {
+	return true
+}
+
+// Options for Sync
+type SyncOption func(*synchronize)
+
+func WithData(data interface{}) SyncOption {
+	return func(sync *synchronize) {
+		sync.data = data
+	}
+}
+
+func WithTimeout(d time.Duration) SyncOption {
+	return func(sync *synchronize) {
+		sync.timeout = d
+	}
+}
+
+func WithEventChan(ch chan *Event) SyncOption {
+	return func(sync *synchronize) {
+		sync.ch = ch
+	}
+}
+
+func WithCallback(cb func(*Event)) SyncOption {
+	return func(sync *synchronize) {
+		sync.cb = cb
+	}
+}
+
+const (
+	statusWorking = iota
+	statusClosed
 )
 
 type SyncHub struct {
 	syncs sync.Map
-	tmr   timer.Timer
+
+	// status
+	status int
+	mtx    sync.RWMutex
+
+	// timer
+	tmr        timer.Timer
+	tmrOutside bool
 }
 
-func NewSyncHub(tmr timer.Timer) *SyncHub {
+type SyncHubOption func(*SyncHub)
+
+func OptionTimer(tmr timer.Timer) SyncHubOption {
+	return func(sh *SyncHub) {
+		sh.tmr = tmr
+		sh.tmrOutside = true
+	}
+}
+
+func NewSyncHub(opts ...SyncHubOption) *SyncHub {
 	sh := &SyncHub{
 		syncs: sync.Map{},
-		tmr:   tmr,
+	}
+	for _, opt := range opts {
+		opt(sh)
 	}
 	return sh
 }
 
-type Event struct {
-	Value interface{}
-	Ack   interface{}
-	Error error
+func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
+	sync := &synchronize{}
+	for _, opt := range opts {
+		opt(sync)
+	}
+	if sync.cb == nil && sync.ch == nil {
+		sync.ch = make(chan *Event, 1)
+	}
+
+	sh.mtx.RLock()
+	defer sh.mtx.RUnlock()
+	if sh.status == statusClosed {
+		event := &Event{
+			SyncID: syncID,
+			Data:   sync.data,
+			Error:  ErrClosed,
+		}
+		if sync.cb != nil {
+			sync.cb(event)
+			return sync
+		}
+		sync.ch <- event
+		return sync
+	}
+
+	for {
+		value, loaded := sh.syncs.LoadOrStore(syncID, sync)
+		if !loaded {
+			break
+		}
+		event := &Event{
+			SyncID: syncID,
+			Data:   sync.data,
+			Error:  ErrIDResynced,
+		}
+		old := value.(*synchronize)
+		if old.tick != nil {
+			old.tick.Cancel()
+		}
+		if old.cb != nil {
+			old.cb(event)
+			continue
+		}
+		old.ch <- event
+	}
+	if sync.timeout != 0 {
+		sync.tick = sh.tmr.Add(sync.timeout, timer.WithData(syncID),
+			timer.WithHandler(sh.timeout))
+	}
+	return sync
 }
 
-type eventchan struct {
-	ch    chan *Event
-	event *Event
-	tick  timer.Tick
-	cb    func(*Event)
-}
-
-func (sh *SyncHub) Sync(syncID interface{}, value interface{}, timeout uint64) chan *Event {
+func (sh *SyncHub) Done(syncID interface{}) bool {
+	value, ok := sh.syncs.LoadAndDelete(syncID)
+	if !ok {
+		return false
+	}
+	sync := value.(*synchronize)
+	if sync.tick != nil {
+		sync.tick.Cancel()
+	}
 	event := &Event{
-		Value: value,
-		Ack:   nil,
-		Error: nil,
+		SyncID: syncID,
+		Data:   sync.data,
 	}
-	ch := make(chan *Event, 1)
-	uNc := &eventchan{ch: ch, event: event}
-	tick, err := sh.tmr.Time(timeout, syncID, nil, sh.timeout)
-	if err != nil {
-		log.Debugf("timer set err: %s", err)
-		return nil
+	if sync.cb != nil {
+		sync.cb(event)
+		return true
 	}
-	uNc.tick = tick
-	value, ok := sh.syncs.Swap(syncID, uNc)
-	if ok {
-		uNcOld := value.(*eventchan)
-		uNcOld.tick.Cancel()
-		uNcOld.event.Error = errors.New("the id was resynced")
-		uNcOld.ch <- uNcOld.event
-	}
-	return ch
+	sync.ch <- event
+	return true
 }
 
-func (sh *SyncHub) Ack(syncID interface{}, ack interface{}) {
-	defer sh.syncs.Delete(syncID)
-
-	value, ok := sh.syncs.Load(syncID)
+func (sh *SyncHub) Ack(syncID interface{}, ack interface{}) bool {
+	value, ok := sh.syncs.LoadAndDelete(syncID)
 	if !ok {
-		return
+		return false
 	}
-	uNc := value.(*eventchan)
-	uNc.tick.Cancel()
-	uNc.event.Ack = ack
-	if uNc.ch != nil {
-		uNc.ch <- uNc.event
+	sync := value.(*synchronize)
+	if sync.tick != nil {
+		sync.tick.Cancel()
 	}
-	if uNc.cb != nil {
-		uNc.cb(uNc.event)
+	event := &Event{
+		SyncID: syncID,
+		Data:   sync.data,
+		Ack:    ack,
 	}
+	if sync.cb != nil {
+		sync.cb(event)
+		return true
+	}
+	sync.ch <- event
+	return true
 }
 
-func (sh *SyncHub) Error(syncID interface{}, err error) {
-	defer sh.syncs.Delete(syncID)
-
-	value, ok := sh.syncs.Load(syncID)
+func (sh *SyncHub) Error(syncID interface{}, err error) bool {
+	value, ok := sh.syncs.LoadAndDelete(syncID)
 	if !ok {
-		return
+		return false
 	}
-	uNc := value.(*eventchan)
-	uNc.tick.Cancel()
-	uNc.event.Error = err
-	if uNc.ch != nil {
-		uNc.ch <- uNc.event
+	sync := value.(*synchronize)
+	if sync.tick != nil {
+		sync.tick.Cancel()
 	}
-	if uNc.cb != nil {
-		uNc.cb(uNc.event)
+	event := &Event{
+		SyncID: sync.syncID,
+		Data:   sync.data,
+		Error:  err,
 	}
+	if sync.cb != nil {
+		sync.cb(event)
+		return true
+	}
+	sync.ch <- event
+	return true
 }
 
-func (sh *SyncHub) Cancel(syncID interface{}) {
-	value, ok := sh.syncs.Load(syncID)
-	if ok {
-		uNc := value.(*eventchan)
-		uNc.tick.Cancel()
-		sh.syncs.Delete(syncID)
-		log.Debugf("syncID: %v canceled", syncID)
+func (sh *SyncHub) Cancel(syncID interface{}) bool {
+	value, ok := sh.syncs.LoadAndDelete(syncID)
+	if !ok {
+		return false
 	}
+	sync := value.(*synchronize)
+	if sync.tick != nil {
+		sync.tick.Cancel()
+	}
+	return true
 }
 
 func (sh *SyncHub) Close() {
+	sh.mtx.Lock()
+	defer sh.mtx.Unlock()
+	sh.status = statusClosed
+
 	sh.syncs.Range(func(key, value interface{}) bool {
-		log.Debugf("syncID: %v force closed", key)
-		uNc := value.(*eventchan)
-		uNc.event.Error = ErrForceClosed
-		if uNc.ch != nil {
-			uNc.ch <- uNc.event
+		sh.syncs.Delete(key)
+		sync := value.(*synchronize)
+		if sync.tick != nil {
+			sync.tick.Cancel()
 		}
-		if uNc.cb != nil {
-			uNc.cb(uNc.event)
+		event := &Event{
+			SyncID: sync.syncID,
+			Data:   sync.data,
+			Error:  ErrForceClosed,
 		}
+		if sync.cb != nil {
+			sync.cb(event)
+			return true
+		}
+		sync.ch <- event
 		return true
 	})
+	if !sh.tmrOutside {
+		sh.tmr.Close()
+	}
 }
 
-func (sh *SyncHub) timeout(data interface{}) error {
-	defer sh.syncs.Delete(data)
-
-	value, ok := sh.syncs.Load(data)
+func (sh *SyncHub) timeout(tevent *timer.Event) {
+	value, ok := sh.syncs.LoadAndDelete(tevent.Data)
 	if !ok {
-		log.Debugf("syncID: %v not found", data)
-		return nil
+		return
 	}
-	uNc := value.(*eventchan)
-	uNc.event.Error = ErrTimeout
-	if uNc.ch != nil {
-		uNc.ch <- uNc.event
+	sync := value.(*synchronize)
+	if sync.tick != nil {
+		sync.tick.Cancel()
 	}
-	if uNc.cb != nil {
-		uNc.cb(uNc.event)
+	event := &Event{
+		SyncID: sync.syncID,
+		Data:   sync.data,
+		Error:  ErrTimeout,
 	}
-	log.Debugf("syncID: %v timeout", data)
-	return nil
+	if sync.cb != nil {
+		sync.cb(event)
+		return
+	}
+	sync.ch <- event
+	return
 }
