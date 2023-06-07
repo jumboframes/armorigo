@@ -9,18 +9,18 @@ import (
 )
 
 var (
-	ErrTimeout         = errors.New("timeout")
-	ErrNotfound        = errors.New("not found")
-	ErrForceClosed     = errors.New("force closed")
-	ErrClosed          = errors.New("synchub closed")
-	ErrTimerNotWorking = errors.New("timer not working")
-	ErrIDResynced      = errors.New("id resynced")
+	ErrSyncTimeout        = errors.New("timeout")
+	ErrSyncHubForceClosed = errors.New("force closed")
+	ErrSyncHubClosed      = errors.New("synchub closed")
+	ErrSyncCanceled       = errors.New("sync canceled")
+	ErrSyncIDResynced     = errors.New("id resynced")
+	ErrTimerNotWorking    = errors.New("timer not working")
 )
 
 // A Sync presents the handler of a synchronize.
 type Sync interface {
 	C() <-chan *Event
-	Cancel() bool
+	Cancel(notify bool) bool
 	Done() bool
 	Ack(ack interface{}) bool
 	Error(err error) bool
@@ -47,8 +47,8 @@ func (ec *synchronize) C() <-chan *Event {
 	return ec.ch
 }
 
-func (ec *synchronize) Cancel() bool {
-	return ec.sh.Cancel(ec.syncID)
+func (ec *synchronize) Cancel(notify bool) bool {
+	return ec.sh.Cancel(ec.syncID, notify)
 }
 
 func (ec *synchronize) Done() bool {
@@ -84,6 +84,7 @@ func WithEventChan(ch chan *Event) SyncOption {
 	}
 }
 
+// Callback if perfered than channel
 func WithCallback(cb func(*Event)) SyncOption {
 	return func(sync *synchronize) {
 		sync.cb = cb
@@ -123,6 +124,9 @@ func NewSyncHub(opts ...SyncHubOption) *SyncHub {
 	for _, opt := range opts {
 		opt(sh)
 	}
+	if !sh.tmrOutside {
+		sh.tmr = timer.NewTimer()
+	}
 	return sh
 }
 
@@ -141,7 +145,7 @@ func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
 		event := &Event{
 			SyncID: syncID,
 			Data:   sync.data,
-			Error:  ErrClosed,
+			Error:  ErrSyncHubClosed,
 		}
 		if sync.cb != nil {
 			sync.cb(event)
@@ -159,7 +163,7 @@ func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
 		event := &Event{
 			SyncID: syncID,
 			Data:   sync.data,
-			Error:  ErrIDResynced,
+			Error:  ErrSyncIDResynced,
 		}
 		old := value.(*synchronize)
 		if old.tick != nil {
@@ -243,7 +247,7 @@ func (sh *SyncHub) Error(syncID interface{}, err error) bool {
 	return true
 }
 
-func (sh *SyncHub) Cancel(syncID interface{}) bool {
+func (sh *SyncHub) Cancel(syncID interface{}, notify bool) bool {
 	value, ok := sh.syncs.LoadAndDelete(syncID)
 	if !ok {
 		return false
@@ -251,6 +255,18 @@ func (sh *SyncHub) Cancel(syncID interface{}) bool {
 	sync := value.(*synchronize)
 	if sync.tick != nil {
 		sync.tick.Cancel()
+	}
+	if notify {
+		event := &Event{
+			SyncID: syncID,
+			Data:   sync.data,
+			Error:  ErrSyncCanceled,
+		}
+		if sync.cb != nil {
+			sync.cb(event)
+			return true
+		}
+		sync.ch <- event
 	}
 	return true
 }
@@ -269,7 +285,7 @@ func (sh *SyncHub) Close() {
 		event := &Event{
 			SyncID: sync.syncID,
 			Data:   sync.data,
-			Error:  ErrForceClosed,
+			Error:  ErrSyncHubForceClosed,
 		}
 		if sync.cb != nil {
 			sync.cb(event)
@@ -289,13 +305,10 @@ func (sh *SyncHub) timeout(tevent *timer.Event) {
 		return
 	}
 	sync := value.(*synchronize)
-	if sync.tick != nil {
-		sync.tick.Cancel()
-	}
 	event := &Event{
 		SyncID: sync.syncID,
 		Data:   sync.data,
-		Error:  ErrTimeout,
+		Error:  ErrSyncTimeout,
 	}
 	if sync.cb != nil {
 		sync.cb(event)

@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestSignal(t *testing.T) {
@@ -22,6 +23,13 @@ func TestSignal(t *testing.T) {
 	go func() {
 		<-ctx.Done()
 		fmt.Println("sub routine quit")
+	}()
+
+	go func() {
+		t := time.NewTimer(time.Second)
+		<-t.C
+		pid := os.Getpid()
+		syscall.Kill(pid, syscall.SIGINT)
 	}()
 
 	sig := NewSignal(OptionSignalCancel(cancel))
