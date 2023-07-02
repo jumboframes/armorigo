@@ -131,7 +131,9 @@ func NewSyncHub(opts ...SyncHubOption) *SyncHub {
 }
 
 func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
-	sync := &synchronize{}
+	sync := &synchronize{
+		sh: sh,
+	}
 	for _, opt := range opts {
 		opt(sync)
 	}
@@ -294,9 +296,11 @@ func (sh *SyncHub) Close() {
 		sync.ch <- event
 		return true
 	})
+
 	if !sh.tmrOutside {
 		sh.tmr.Close()
 	}
+	sh.tmr = nil
 }
 
 func (sh *SyncHub) timeout(tevent *timer.Event) {
