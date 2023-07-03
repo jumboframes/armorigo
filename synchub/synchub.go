@@ -132,7 +132,8 @@ func NewSyncHub(opts ...SyncHubOption) *SyncHub {
 
 func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
 	sync := &synchronize{
-		sh: sh,
+		sh:     sh,
+		syncID: syncID,
 	}
 	for _, opt := range opts {
 		opt(sync)
