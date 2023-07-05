@@ -1,6 +1,7 @@
 package synchub
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -34,6 +35,9 @@ type Event struct {
 type synchronize struct {
 	sh           *SyncHub
 	syncID, data interface{}
+	// another
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// sync method
 	cb func(*Event)
@@ -91,6 +95,13 @@ func WithCallback(cb func(*Event)) SyncOption {
 	}
 }
 
+// bad design, but still I want keep the capability
+func WithContext(ctx context.Context) SyncOption {
+	return func(sync *synchronize) {
+		sync.ctx, sync.cancel = context.WithCancel(ctx)
+	}
+}
+
 const (
 	statusWorking = iota
 	statusClosed
@@ -130,7 +141,12 @@ func NewSyncHub(opts ...SyncHubOption) *SyncHub {
 	return sh
 }
 
+// deprecated
 func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
+	return sh.Add(syncID, opts...)
+}
+
+func (sh *SyncHub) Add(syncID interface{}, opts ...SyncOption) Sync {
 	sync := &synchronize{
 		sh:     sh,
 		syncID: syncID,
@@ -178,6 +194,28 @@ func (sh *SyncHub) New(syncID interface{}, opts ...SyncOption) Sync {
 		}
 		old.ch <- event
 	}
+	if sync.ctx != nil {
+		go func() {
+			select {
+			case <-sync.ctx.Done():
+				_, ok := sh.syncs.LoadAndDelete(syncID)
+				if !ok {
+					return
+				}
+				// only ctx.Done leads to Cancel Err
+				event := &Event{
+					SyncID: syncID,
+					Data:   sync.data,
+					Error:  sync.ctx.Err(),
+				}
+				if sync.cb != nil {
+					sync.cb(event)
+					return
+				}
+				sync.ch <- event
+			}
+		}()
+	}
 	if sync.timeout != 0 {
 		sync.tick = sh.tmr.Add(sync.timeout, timer.WithData(syncID),
 			timer.WithHandler(sh.timeout))
@@ -191,7 +229,12 @@ func (sh *SyncHub) Done(syncID interface{}) bool {
 		return false
 	}
 	sync := value.(*synchronize)
+	if sync.cancel != nil {
+		// notify the context goroutine to quit
+		sync.cancel()
+	}
 	if sync.tick != nil {
+		// notify the tick without firing
 		sync.tick.Cancel()
 	}
 	event := &Event{
@@ -212,7 +255,12 @@ func (sh *SyncHub) Ack(syncID interface{}, ack interface{}) bool {
 		return false
 	}
 	sync := value.(*synchronize)
+	if sync.cancel != nil {
+		// notify the context goroutine to quit
+		sync.cancel()
+	}
 	if sync.tick != nil {
+		// notify the tick without firing
 		sync.tick.Cancel()
 	}
 	event := &Event{
@@ -233,8 +281,14 @@ func (sh *SyncHub) Error(syncID interface{}, err error) bool {
 	if !ok {
 		return false
 	}
+
 	sync := value.(*synchronize)
+	if sync.cancel != nil {
+		// notify the context goroutine to quit
+		sync.cancel()
+	}
 	if sync.tick != nil {
+		// notify the tick without firing
 		sync.tick.Cancel()
 	}
 	event := &Event{
@@ -247,6 +301,7 @@ func (sh *SyncHub) Error(syncID interface{}, err error) bool {
 		return true
 	}
 	sync.ch <- event
+
 	return true
 }
 
@@ -256,7 +311,12 @@ func (sh *SyncHub) Cancel(syncID interface{}, notify bool) bool {
 		return false
 	}
 	sync := value.(*synchronize)
+	if sync.cancel != nil {
+		// notify the context goroutine to quit
+		sync.cancel()
+	}
 	if sync.tick != nil {
+		// notify the tick without firing
 		sync.tick.Cancel()
 	}
 	if notify {
@@ -282,7 +342,12 @@ func (sh *SyncHub) Close() {
 	sh.syncs.Range(func(key, value interface{}) bool {
 		sh.syncs.Delete(key)
 		sync := value.(*synchronize)
+		if sync.cancel != nil {
+			// notify the context goroutine to quit
+			sync.cancel()
+		}
 		if sync.tick != nil {
+			// notify the tick without firing
 			sync.tick.Cancel()
 		}
 		event := &Event{
@@ -310,6 +375,10 @@ func (sh *SyncHub) timeout(tevent *timer.Event) {
 		return
 	}
 	sync := value.(*synchronize)
+	if sync.cancel != nil {
+		// notify the context goroutine to quit
+		sync.cancel()
+	}
 	event := &Event{
 		SyncID: sync.syncID,
 		Data:   sync.data,
