@@ -4,7 +4,7 @@
  * Copyright (c) 2022, Austin Zhai
  * All rights reserved.
  */
-package pproxy
+package rproxy
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"github.com/jumboframes/armorigo/log"
 )
 
-type OptionPProxy func(pproxy *PProxy) error
+type OptionRProxy func(rproxy *RProxy) error
 
 // You can return a custom data for later usage
 type PostAccept func(src net.Addr, dst net.Addr) (interface{}, error)
@@ -25,42 +25,42 @@ type PreDial func(custom interface{}) error
 type PostDial func(custom interface{}) error
 type Dial func(dst net.Addr, custom interface{}) (net.Conn, error)
 
-func OptionPProxyPostAccept(postAccept PostAccept) OptionPProxy {
-	return func(pproxy *PProxy) error {
-		pproxy.postAccept = postAccept
+func OptionRProxyPostAccept(postAccept PostAccept) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.postAccept = postAccept
 		return nil
 	}
 }
 
-func OptionPProxyPreWrite(preWrite PreWrite) OptionPProxy {
-	return func(pproxy *PProxy) error {
-		pproxy.preWrite = preWrite
+func OptionRProxyPreWrite(preWrite PreWrite) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.preWrite = preWrite
 		return nil
 	}
 }
 
-func OptionPProxyPreDial(preDial PreDial) OptionPProxy {
-	return func(pproxy *PProxy) error {
-		pproxy.preDial = preDial
+func OptionRProxyPreDial(preDial PreDial) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.preDial = preDial
 		return nil
 	}
 }
 
-func OptionPProxyPostDial(postDial PostDial) OptionPProxy {
-	return func(pproxy *PProxy) error {
-		pproxy.postDial = postDial
+func OptionRProxyPostDial(postDial PostDial) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.postDial = postDial
 		return nil
 	}
 }
 
-func OptionPProxyDial(dial Dial) OptionPProxy {
-	return func(pproxy *PProxy) error {
-		pproxy.dial = dial
+func OptionRProxyDial(dial Dial) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.dial = dial
 		return nil
 	}
 }
 
-type PProxy struct {
+type RProxy struct {
 	listener net.Listener
 
 	//hooks
@@ -75,38 +75,38 @@ type PProxy struct {
 	mutex sync.RWMutex
 }
 
-func NewPProxy(ln net.Listener, options ...OptionPProxy) (*PProxy, error) {
+func NewRProxy(ln net.Listener, options ...OptionRProxy) (*RProxy, error) {
 
-	pproxy := &PProxy{listener: ln}
+	rproxy := &RProxy{listener: ln}
 	for _, option := range options {
-		if err := option(pproxy); err != nil {
+		if err := option(rproxy); err != nil {
 			return nil, err
 		}
 	}
 
-	return pproxy, nil
+	return rproxy, nil
 }
 
-func (pproxy *PProxy) Proxy(ctx context.Context) {
+func (rproxy *RProxy) Proxy(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
-		pproxy.listener.Close()
+		rproxy.listener.Close()
 	}()
 
 	for {
-		conn, err := pproxy.listener.Accept()
+		conn, err := rproxy.listener.Accept()
 		if err != nil {
 			if strings.Contains(err.Error(), "too many open files") {
-				log.Errorf("pproxy accept conn err: %s, retrying", err)
+				log.Errorf("rproxy accept conn err: %s, retrying", err)
 				continue
 			}
-			log.Debugf("pproxy accept conn err: %s, quiting", err)
+			log.Debugf("rproxy accept conn err: %s, quiting", err)
 			return
 		}
 
 		var custom interface{}
-		if pproxy.postAccept != nil {
-			if custom, err = pproxy.postAccept(conn.RemoteAddr(), conn.LocalAddr()); err != nil {
+		if rproxy.postAccept != nil {
+			if custom, err = rproxy.postAccept(conn.RemoteAddr(), conn.LocalAddr()); err != nil {
 				log.Errorf("post accept return err: %s", err)
 				if err = conn.Close(); err != nil {
 					log.Errorf("close left conn err: %s", err)
@@ -116,7 +116,7 @@ func (pproxy *PProxy) Proxy(ctx context.Context) {
 		}
 
 		pipe := &Pipe{
-			pproxy:   pproxy,
+			rproxy:   rproxy,
 			Src:      conn.RemoteAddr(),
 			Dst:      conn.LocalAddr(),
 			custom:   custom,
@@ -127,32 +127,32 @@ func (pproxy *PProxy) Proxy(ctx context.Context) {
 	}
 }
 
-func (pproxy *PProxy) addPipe(pipe *Pipe) {
-	pproxy.mutex.Lock()
+func (rproxy *RProxy) addPipe(pipe *Pipe) {
+	rproxy.mutex.Lock()
 	key := pipe.Src.String() + pipe.Dst.String()
-	pproxy.pipes[key] = pipe
-	pproxy.mutex.Unlock()
+	rproxy.pipes[key] = pipe
+	rproxy.mutex.Unlock()
 }
 
-func (pproxy *PProxy) delPipe(pipe *Pipe) {
-	pproxy.mutex.Lock()
+func (rproxy *RProxy) delPipe(pipe *Pipe) {
+	rproxy.mutex.Lock()
 	key := pipe.Src.String() + pipe.Dst.String()
-	delete(pproxy.pipes, key)
-	pproxy.mutex.Unlock()
+	delete(rproxy.pipes, key)
+	rproxy.mutex.Unlock()
 }
 
-func (pproxy *PProxy) Close() {
-	if pproxy.listener != nil {
-		err := pproxy.listener.Close()
+func (rproxy *RProxy) Close() {
+	if rproxy.listener != nil {
+		err := rproxy.listener.Close()
 		if err != nil {
-			log.Errorf("pproxy listener close err: %s, routine continued", err)
+			log.Errorf("rproxy listener close err: %s, routine continued", err)
 		}
 	}
 }
 
 type Pipe struct {
 	//father
-	pproxy *PProxy
+	rproxy *RProxy
 
 	Src net.Addr
 	Dst net.Addr
@@ -165,11 +165,11 @@ type Pipe struct {
 }
 
 func (pipe *Pipe) proxy(ctx context.Context) {
-	defer pipe.pproxy.delPipe(pipe)
+	defer pipe.rproxy.delPipe(pipe)
 
 	// 预先连接
-	if pipe.pproxy.preDial != nil {
-		if err := pipe.pproxy.preDial(pipe.custom); err != nil {
+	if pipe.rproxy.preDial != nil {
+		if err := pipe.rproxy.preDial(pipe.custom); err != nil {
 			log.Errorf("pre dial error: %v", err)
 			_ = pipe.leftConn.Close()
 			return
@@ -180,8 +180,8 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 	dial := func(dst net.Addr, custom interface{}) (net.Conn, error) {
 		return net.Dial(dst.Network(), dst.String())
 	}
-	if pipe.pproxy.dial != nil {
-		dial = pipe.pproxy.dial
+	if pipe.rproxy.dial != nil {
+		dial = pipe.rproxy.dial
 	}
 	pipe.rightConn, err = dial(pipe.Dst, pipe.custom)
 	if err != nil {
@@ -191,8 +191,8 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 	}
 
 	// 连接后
-	if pipe.pproxy.postDial != nil {
-		if err := pipe.pproxy.postDial(pipe.custom); err != nil {
+	if pipe.rproxy.postDial != nil {
+		if err := pipe.rproxy.postDial(pipe.custom); err != nil {
 			log.Errorf("post dial error: %v", err)
 			_ = pipe.leftConn.Close()
 			_ = pipe.rightConn.Close()
@@ -201,8 +201,8 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 	}
 
 	// 预先写
-	if pipe.pproxy.preWrite != nil {
-		if err = pipe.pproxy.preWrite(pipe.rightConn, pipe.custom); err != nil {
+	if pipe.rproxy.preWrite != nil {
+		if err = pipe.rproxy.preWrite(pipe.rightConn, pipe.custom); err != nil {
 			_ = pipe.leftConn.Close()
 			_ = pipe.rightConn.Close()
 			return
