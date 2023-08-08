@@ -88,6 +88,43 @@ func TestSyncHub_Done(t *testing.T) {
 	}
 }
 
+func TestSyncHub_DoneSub(t *testing.T) {
+	sh := NewSyncHub()
+
+	type args struct {
+		syncID interface{}
+		data   interface{}
+		opts   []SyncOption
+	}
+	tests := []struct {
+		name string
+		args args
+	}{}
+	for i := 0; i < 10000; i++ {
+		test := struct {
+			name string
+			args args
+		}{
+			name: strconv.Itoa(i),
+			args: args{
+				syncID: i,
+				data:   i,
+				opts:   []SyncOption{WithData(i), WithSub(i, "b")},
+			},
+		}
+		tests = append(tests, test)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sync := sh.Add(tt.args.syncID, tt.args.opts...)
+			go sh.DoneSub(tt.args.syncID, "b")
+			go sh.DoneSub(tt.args.syncID, tt.args.data)
+			event := <-sync.C()
+			assert.Equal(t, tt.args.data, event.Data)
+		})
+	}
+}
+
 func TestSyncHub_Ack(t *testing.T) {
 	sh := NewSyncHub()
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	gosync "sync"
 	"time"
 
 	"github.com/singchia/go-timer/v2"
@@ -23,18 +24,25 @@ type Sync interface {
 	C() <-chan *Event
 	Cancel(notify bool) bool
 	Done() bool
+	DoneSub(subSyncID interface{}) bool
 	Ack(ack interface{}) bool
 	Error(err error) bool
 }
 
 type Event struct {
-	SyncID, Data, Ack interface{}
-	Error             error
+	SyncID    interface{}
+	Data, Ack interface{}
+	Error     error
 }
 
 type synchronize struct {
-	sh           *SyncHub
-	syncID, data interface{}
+	sh     *SyncHub
+	syncID interface{}
+	data   interface{}
+	// sub syncs
+	subSyncMtx *sync.RWMutex
+	subSyncs   map[interface{}]struct{}
+
 	// another
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -57,6 +65,10 @@ func (ec *synchronize) Cancel(notify bool) bool {
 
 func (ec *synchronize) Done() bool {
 	return ec.sh.Done(ec.syncID)
+}
+
+func (ec *synchronize) DoneSub(subSyncID interface{}) bool {
+	return ec.sh.DoneSub(ec.syncID, subSyncID)
 }
 
 func (ec *synchronize) Ack(ack interface{}) bool {
@@ -99,6 +111,16 @@ func WithCallback(cb func(*Event)) SyncOption {
 func WithContext(ctx context.Context) SyncOption {
 	return func(sync *synchronize) {
 		sync.ctx, sync.cancel = context.WithCancel(ctx)
+	}
+}
+
+func WithSub(subSyncIDs ...interface{}) SyncOption {
+	return func(sync *synchronize) {
+		sync.subSyncMtx = new(gosync.RWMutex)
+		sync.subSyncs = make(map[interface{}]struct{})
+		for _, subSyncID := range subSyncIDs {
+			sync.subSyncs[subSyncID] = struct{}{}
+		}
 	}
 }
 
@@ -223,12 +245,7 @@ func (sh *SyncHub) Add(syncID interface{}, opts ...SyncOption) Sync {
 	return sync
 }
 
-func (sh *SyncHub) Done(syncID interface{}) bool {
-	value, ok := sh.syncs.LoadAndDelete(syncID)
-	if !ok {
-		return false
-	}
-	sync := value.(*synchronize)
+func done(sync *synchronize) {
 	if sync.cancel != nil {
 		// notify the context goroutine to quit
 		sync.cancel()
@@ -238,14 +255,54 @@ func (sh *SyncHub) Done(syncID interface{}) bool {
 		sync.tick.Cancel()
 	}
 	event := &Event{
-		SyncID: syncID,
+		SyncID: sync.syncID,
 		Data:   sync.data,
 	}
 	if sync.cb != nil {
 		sync.cb(event)
-		return true
+		return
 	}
 	sync.ch <- event
+}
+
+// Done finish the Sync, false means no such syncID
+func (sh *SyncHub) Done(syncID interface{}) bool {
+	value, ok := sh.syncs.LoadAndDelete(syncID)
+	if !ok {
+		return false
+	}
+	sync := value.(*synchronize)
+	done(sync)
+	return true
+}
+
+// DoneSubSyncID finish the partial Sync if other subSyncID exists or else to finish the complete Sync
+// return false means syncID or subSyncID not found
+func (sh *SyncHub) DoneSub(syncID interface{}, subSyncID interface{}) bool {
+	value, ok := sh.syncs.Load(syncID)
+	if !ok {
+		return false
+	}
+	sync := value.(*synchronize)
+	if sync.subSyncMtx == nil {
+		return false
+	}
+	sync.subSyncMtx.Lock()
+	_, ok = sync.subSyncs[subSyncID]
+	if !ok {
+		sync.subSyncMtx.Unlock()
+		return false
+	}
+	delete(sync.subSyncs, subSyncID)
+	if len(sync.subSyncs) != 0 {
+		sync.subSyncMtx.Unlock()
+		return true
+	}
+	sync.subSyncMtx.Unlock()
+
+	// finish the Sync
+	sh.syncs.Delete(syncID)
+	done(sync)
 	return true
 }
 
