@@ -117,7 +117,8 @@ func WithContext(ctx context.Context) SyncOption {
 func WithSub(subSyncIDs ...interface{}) SyncOption {
 	return func(sync *synchronize) {
 		sync.subSyncMtx = new(gosync.RWMutex)
-		for _, subSyncID := range sync.subSyncs {
+		sync.subSyncs = make(map[interface{}]struct{})
+		for _, subSyncID := range subSyncIDs {
 			sync.subSyncs[subSyncID] = struct{}{}
 		}
 	}
@@ -283,6 +284,9 @@ func (sh *SyncHub) DoneSub(syncID interface{}, subSyncID interface{}) bool {
 		return false
 	}
 	sync := value.(*synchronize)
+	if sync.subSyncMtx == nil {
+		return false
+	}
 	sync.subSyncMtx.Lock()
 	_, ok = sync.subSyncs[subSyncID]
 	if !ok {
@@ -292,7 +296,7 @@ func (sh *SyncHub) DoneSub(syncID interface{}, subSyncID interface{}) bool {
 	delete(sync.subSyncs, subSyncID)
 	if len(sync.subSyncs) != 0 {
 		sync.subSyncMtx.Unlock()
-		return false
+		return true
 	}
 	sync.subSyncMtx.Unlock()
 
