@@ -3,6 +3,7 @@ package synchub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	gosync "sync"
 	"time"
@@ -110,6 +111,12 @@ func WithCallback(cb func(*Event)) SyncOption {
 // bad design, but still I want keep the capability
 func WithContext(ctx context.Context) SyncOption {
 	return func(sync *synchronize) {
+		str, ok := ctx.(fmt.Stringer)
+		if ok {
+			if str.String() == "context.TODO" || str.String() == "context.Background" {
+				return
+			}
+		}
 		sync.ctx, sync.cancel = context.WithCancel(ctx)
 	}
 }
