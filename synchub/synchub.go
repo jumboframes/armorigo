@@ -203,11 +203,8 @@ func (sh *SyncHub) Add(syncID interface{}, opts ...SyncOption) Sync {
 		return sync
 	}
 
-	for {
-		value, loaded := sh.syncs.LoadOrStore(syncID, sync)
-		if !loaded {
-			break
-		}
+	value, loaded := sh.syncs.Swap(syncID, sync)
+	if loaded {
 		event := &Event{
 			SyncID: syncID,
 			Data:   sync.data,
@@ -219,9 +216,9 @@ func (sh *SyncHub) Add(syncID interface{}, opts ...SyncOption) Sync {
 		}
 		if old.cb != nil {
 			old.cb(event)
-			continue
+		} else {
+			old.ch <- event
 		}
-		old.ch <- event
 	}
 	if sync.ctx != nil {
 		go func() {

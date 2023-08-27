@@ -3,6 +3,7 @@ package synchub
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -121,6 +122,41 @@ func TestSyncHub_DoneSub(t *testing.T) {
 			go sh.DoneSub(tt.args.syncID, tt.args.data)
 			event := <-sync.C()
 			assert.Equal(t, tt.args.data, event.Data)
+		})
+	}
+}
+
+func TestSyncHub_SameAdd(t *testing.T) {
+	sh := NewSyncHub()
+
+	type args struct {
+		syncID interface{}
+		data   interface{}
+		opts   []SyncOption
+	}
+	tests := []struct {
+		name string
+		args args
+	}{}
+	for i := 0; i < 2; i++ {
+		test := struct {
+			name string
+			args args
+		}{
+			name: strconv.Itoa(i),
+			args: args{
+				syncID: 1,
+				data:   i,
+				opts: []SyncOption{WithData(1), WithCallback(func(event *Event) {
+					log.Println(event.Error)
+				})},
+			},
+		}
+		tests = append(tests, test)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sh.Add(tt.args.syncID, tt.args.opts...)
 		})
 	}
 }
