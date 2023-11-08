@@ -12,6 +12,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jumboframes/armorigo/log"
 )
@@ -60,6 +61,20 @@ func OptionRProxyDial(dial Dial) OptionRProxy {
 	}
 }
 
+func OptionRProxyQuitOn(errs ...error) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.errs = errs
+		return nil
+	}
+}
+
+func OptionRProxyWaitOnErr(wait time.Duration) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.wait = wait
+		return nil
+	}
+}
+
 type RProxy struct {
 	listener net.Listener
 
@@ -73,6 +88,10 @@ type RProxy struct {
 	//holder
 	pipes map[string]*Pipe
 	mutex sync.RWMutex
+
+	// exit conditions
+	errs []error
+	wait time.Duration
 }
 
 func NewRProxy(ln net.Listener, options ...OptionRProxy) (*RProxy, error) {
@@ -96,13 +115,19 @@ func (rproxy *RProxy) Proxy(ctx context.Context) {
 	for {
 		conn, err := rproxy.listener.Accept()
 		if err != nil {
-			if strings.Contains(err.Error(), "too many open files") {
-				log.Errorf("rproxy accept conn err: %s, retrying", err)
-				continue
+			for _, elem := range rproxy.errs {
+				if elem == err {
+					log.Infof("rproxy accept conn err: %s, quiting", err)
+					return
+				}
 			}
-			log.Debugf("rproxy accept conn err: %s, quiting", err)
-			return
+			log.Infof("rproxy accept conn err: %s, no quiting err matched, continuing", err)
+			if rproxy.wait != 0 {
+				time.Sleep(rproxy.wait)
+			}
+			continue
 		}
+		log.Debugf("rproxy accept conn: %s", conn.RemoteAddr())
 
 		var custom interface{}
 		if rproxy.postAccept != nil {
@@ -162,9 +187,13 @@ type Pipe struct {
 
 	leftConn  net.Conn
 	rightConn net.Conn
+
+	startTime, dialTime, endTime time.Time
 }
 
 func (pipe *Pipe) proxy(ctx context.Context) {
+	pipe.startTime = time.Now()
+
 	defer pipe.rproxy.delPipe(pipe)
 
 	// 预先连接
@@ -185,10 +214,12 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 	}
 	pipe.rightConn, err = dial(pipe.Dst, pipe.custom)
 	if err != nil {
-		log.Errorf("dial error: %v", err)
+		log.Errorf("dial error: %v, leftConn: %s, rightConn: %s", err,
+			pipe.leftConn.RemoteAddr(), pipe.Dst)
 		_ = pipe.leftConn.Close()
 		return
 	}
+	pipe.dialTime = time.Now()
 
 	// 连接后
 	if pipe.rproxy.postDial != nil {
@@ -216,7 +247,7 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 		defer wg.Done()
 
 		_, err := io.Copy(pipe.leftConn, pipe.rightConn)
-		if err != nil {
+		if err != nil && !isErrClosed(err) {
 			log.Errorf("read right, src: %s, dst: %s; to left, src: %s, dst: %s err: %s",
 				pipe.rightConn.LocalAddr().String(),
 				pipe.rightConn.RemoteAddr().String(),
@@ -232,7 +263,7 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 		defer wg.Done()
 
 		_, err := io.Copy(pipe.rightConn, pipe.leftConn)
-		if err != nil {
+		if err != nil && !isErrClosed(err) {
 			log.Errorf("read left, src: %s, dst: %s; to right, src: %s, dst: %s err: %s",
 				pipe.leftConn.RemoteAddr().String(),
 				pipe.leftConn.LocalAddr().String(),
@@ -258,5 +289,16 @@ func (pipe *Pipe) proxy(ctx context.Context) {
 	}()
 	wg.Wait()
 
-	log.Debugf("close right and left conn")
+	pipe.endTime = time.Now()
+	dialCost := pipe.dialTime.Sub(pipe.startTime)
+	totalCost := pipe.endTime.Sub(pipe.startTime)
+	log.Debugf("close right and left conn, dial(left: %s right: %s) cost: %d, total cost: %d",
+		pipe.rightConn.LocalAddr(), pipe.rightConn.RemoteAddr(), dialCost.Milliseconds(), totalCost.Milliseconds())
+}
+
+func isErrClosed(err error) bool {
+	if strings.Contains(err.Error(), net.ErrClosed.Error()) {
+		return true
+	}
+	return false
 }
