@@ -220,7 +220,7 @@ func NewLog() *Log {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 	return &Log{
 		logger: logger,
-		level:  LevelTrace,
+		level:  LevelInfo,
 	}
 }
 
