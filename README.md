@@ -7,7 +7,9 @@
 - sync
     - Once with TryLock
 - synchub
-    - A synchronization hubor with timeout, ack, done and error
+    - A synchronization hubor with Timeout, Ack, Done and Error
+- trie
+    - Trie with LPM
 - io
     - Write all to writer
 - log
