@@ -17,12 +17,11 @@ type KLog struct {
 func NewKLog() *KLog {
 	return &KLog{
 		verbosities: []int{
-			0,
+			6,
 			5, // LevelTrace
 			4, // LevelDebug
-			3, // LevelInfo
-			2, // LevelWarn
-			1, // LevelError, actually we don't use it for now
+			1, // LevelInfo
+			0, // LevelWarn
 		},
 	}
 }
