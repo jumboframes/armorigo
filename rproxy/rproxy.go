@@ -25,6 +25,7 @@ type PreWrite func(writer io.Writer, custom interface{}) error
 type PreDial func(custom interface{}) error
 type PostDial func(custom interface{}) error
 type Dial func(dst net.Addr, custom interface{}) (net.Conn, error)
+type ReplaceDst func(conn net.Conn) (net.Addr, net.Conn, error)
 
 func OptionRProxyPostAccept(postAccept PostAccept) OptionRProxy {
 	return func(rproxy *RProxy) error {
@@ -61,6 +62,13 @@ func OptionRProxyDial(dial Dial) OptionRProxy {
 	}
 }
 
+func OptionRProxyReplaceDst(replaceDst ReplaceDst) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.replaceDst = replaceDst
+		return nil
+	}
+}
+
 func OptionRProxyQuitOn(errs ...error) OptionRProxy {
 	return func(rproxy *RProxy) error {
 		rproxy.errs = errs
@@ -84,6 +92,7 @@ type RProxy struct {
 	preDial    PreDial
 	postDial   PostDial
 	dial       Dial
+	replaceDst ReplaceDst
 
 	//holder
 	pipes map[string]*Pipe
@@ -127,11 +136,19 @@ func (rproxy *RProxy) Proxy(ctx context.Context) {
 			}
 			continue
 		}
-		log.Debugf("rproxy accept conn: %s", conn.RemoteAddr())
+
+		src, dst := conn.RemoteAddr(), conn.LocalAddr()
+		if rproxy.replaceDst != nil {
+			dst, conn, err = rproxy.replaceDst(conn)
+			if err != nil {
+				continue
+			}
+		}
+		log.Debugf("rproxy accept conn, src: %s, dst: %s", src, dst)
 
 		var custom interface{}
 		if rproxy.postAccept != nil {
-			if custom, err = rproxy.postAccept(conn.RemoteAddr(), conn.LocalAddr()); err != nil {
+			if custom, err = rproxy.postAccept(src, dst); err != nil {
 				log.Errorf("post accept return err: %s", err)
 				if err = conn.Close(); err != nil {
 					log.Errorf("close left conn err: %s", err)
@@ -142,8 +159,8 @@ func (rproxy *RProxy) Proxy(ctx context.Context) {
 
 		pipe := &Pipe{
 			rproxy:   rproxy,
-			Src:      conn.RemoteAddr(),
-			Dst:      conn.LocalAddr(),
+			Src:      src,
+			Dst:      dst,
 			custom:   custom,
 			leftConn: conn,
 		}
