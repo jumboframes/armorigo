@@ -124,6 +124,9 @@ func (rproxy *RProxy) Proxy(ctx context.Context) {
 	for {
 		conn, err := rproxy.listener.Accept()
 		if err != nil {
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return
+			}
 			for _, elem := range rproxy.errs {
 				if elem == err {
 					log.Infof("rproxy accept conn err: %s, quiting", err)
