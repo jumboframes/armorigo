@@ -19,17 +19,26 @@ import (
 
 type OptionRProxy func(rproxy *RProxy) error
 
+// ReplaceDst -> PostAccept -> HandleConn -> PreDial -> Dial -> PostDial -> PreWrite
 // You can return a custom data for later usage
-type PostAccept func(src net.Addr, dst net.Addr) (interface{}, error)
-type PreWrite func(writer io.Writer, custom interface{}) error
+type ReplaceDst func(conn net.Conn) (src net.Addr, dst net.Conn, err error)
+type PostAccept func(src net.Addr, dst net.Addr) (custom interface{}, err error)
+type HandleConn func(conn net.Conn, custom interface{}) error
 type PreDial func(custom interface{}) error
+type Dial func(dst net.Addr, custom interface{}) (target net.Conn, err error)
 type PostDial func(custom interface{}) error
-type Dial func(dst net.Addr, custom interface{}) (net.Conn, error)
-type ReplaceDst func(conn net.Conn) (net.Addr, net.Conn, error)
+type PreWrite func(writer io.Writer, custom interface{}) error
 
 func OptionRProxyPostAccept(postAccept PostAccept) OptionRProxy {
 	return func(rproxy *RProxy) error {
 		rproxy.postAccept = postAccept
+		return nil
+	}
+}
+
+func OptionRProxyHandleConn(handleConn HandleConn) OptionRProxy {
+	return func(rproxy *RProxy) error {
+		rproxy.handleConn = handleConn
 		return nil
 	}
 }
@@ -88,6 +97,7 @@ type RProxy struct {
 
 	//hooks
 	postAccept PostAccept
+	handleConn HandleConn
 	preWrite   PreWrite
 	preDial    PreDial
 	postDial   PostDial
@@ -153,6 +163,16 @@ func (rproxy *RProxy) Proxy(ctx context.Context) {
 		if rproxy.postAccept != nil {
 			if custom, err = rproxy.postAccept(src, dst); err != nil {
 				log.Errorf("post accept return err: %s", err)
+				if err = conn.Close(); err != nil {
+					log.Errorf("close left conn err: %s", err)
+				}
+				continue
+			}
+		}
+
+		if rproxy.handleConn != nil {
+			if err := rproxy.handleConn(conn, custom); err != nil {
+				log.Errorf("handle conn err: %s", err)
 				if err = conn.Close(); err != nil {
 					log.Errorf("close left conn err: %s", err)
 				}
