@@ -19,26 +19,26 @@ import (
 
 type OptionRProxy func(rproxy *RProxy) error
 
-// ReplaceDst -> PostAccept -> HandleConn -> PreDial -> Dial -> PostDial -> PreWrite
+// AcceptConn -> ReplaceDst -> PostAccept -> PreDial -> Dial -> PostDial -> PreWrite
 // You can return a custom data for later usage
-type ReplaceDst func(conn net.Conn) (src net.Addr, dst net.Conn, err error)
-type PostAccept func(src net.Addr, dst net.Addr) (custom interface{}, err error)
-type HandleConn func(conn net.Conn, custom interface{}) error
+type AcceptConn func(conn net.Conn) ([]interface{}, error)
+type ReplaceDst func(conn net.Conn, meta ...interface{}) (src net.Addr, dst net.Conn, err error)
+type PostAccept func(src net.Addr, dst net.Addr, meta ...interface{}) (custom interface{}, err error)
 type PreDial func(custom interface{}) error
 type Dial func(dst net.Addr, custom interface{}) (target net.Conn, err error)
 type PostDial func(custom interface{}) error
 type PreWrite func(writer io.Writer, custom interface{}) error
 
-func OptionRProxyPostAccept(postAccept PostAccept) OptionRProxy {
+func OptionRProxyAcceptConn(acceptConn AcceptConn) OptionRProxy {
 	return func(rproxy *RProxy) error {
-		rproxy.postAccept = postAccept
+		rproxy.acceptConn = acceptConn
 		return nil
 	}
 }
 
-func OptionRProxyHandleConn(handleConn HandleConn) OptionRProxy {
+func OptionRProxyPostAccept(postAccept PostAccept) OptionRProxy {
 	return func(rproxy *RProxy) error {
-		rproxy.handleConn = handleConn
+		rproxy.postAccept = postAccept
 		return nil
 	}
 }
@@ -96,8 +96,8 @@ type RProxy struct {
 	listener net.Listener
 
 	//hooks
+	acceptConn AcceptConn
 	postAccept PostAccept
-	handleConn HandleConn
 	preWrite   PreWrite
 	preDial    PreDial
 	postDial   PostDial
@@ -150,29 +150,31 @@ func (rproxy *RProxy) Proxy(ctx context.Context) {
 			continue
 		}
 
-		src, dst := conn.RemoteAddr(), conn.LocalAddr()
-		if rproxy.replaceDst != nil {
-			dst, conn, err = rproxy.replaceDst(conn)
+		meta := []interface{}{}
+		if rproxy.acceptConn != nil {
+			meta, err = rproxy.acceptConn(conn)
 			if err != nil {
+				conn.Close()
 				continue
 			}
+		}
+
+		var replaceconn net.Conn
+		src, dst := conn.RemoteAddr(), conn.LocalAddr()
+		if rproxy.replaceDst != nil {
+			dst, replaceconn, err = rproxy.replaceDst(conn, meta...)
+			if err != nil {
+				conn.Close()
+				continue
+			}
+			conn = replaceconn
 		}
 		log.Debugf("rproxy accept conn, src: %s, dst: %s", src, dst)
 
 		var custom interface{}
 		if rproxy.postAccept != nil {
-			if custom, err = rproxy.postAccept(src, dst); err != nil {
+			if custom, err = rproxy.postAccept(src, dst, meta...); err != nil {
 				log.Errorf("post accept return err: %s", err)
-				if err = conn.Close(); err != nil {
-					log.Errorf("close left conn err: %s", err)
-				}
-				continue
-			}
-		}
-
-		if rproxy.handleConn != nil {
-			if err := rproxy.handleConn(conn, custom); err != nil {
-				log.Errorf("handle conn err: %s", err)
 				if err = conn.Close(); err != nil {
 					log.Errorf("close left conn err: %s", err)
 				}
