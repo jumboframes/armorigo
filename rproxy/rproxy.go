@@ -8,6 +8,7 @@ package rproxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -93,7 +94,9 @@ func OptionRProxyWaitOnErr(wait time.Duration) OptionRProxy {
 }
 
 type RProxy struct {
-	listener net.Listener
+	listener          net.Listener
+	listenerCloseOnce sync.Once
+	listenerCloseErr  error
 
 	//hooks
 	acceptConn AcceptConn
@@ -126,15 +129,20 @@ func NewRProxy(ln net.Listener, options ...OptionRProxy) (*RProxy, error) {
 }
 
 func (rproxy *RProxy) Proxy(ctx context.Context) {
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-ctx.Done()
-		rproxy.listener.Close()
+		select {
+		case <-ctx.Done():
+			rproxy.Close()
+		case <-done:
+		}
 	}()
 
 	for {
 		conn, err := rproxy.listener.Accept()
 		if err != nil {
-			if strings.Contains(err.Error(), "use of closed network connection") {
+			if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "use of closed network connection") {
 				return
 			}
 			for _, elem := range rproxy.errs {
@@ -208,12 +216,25 @@ func (rproxy *RProxy) delPipe(pipe *Pipe) {
 	rproxy.mutex.Unlock()
 }
 
-func (rproxy *RProxy) Close() {
-	if rproxy.listener != nil {
-		err := rproxy.listener.Close()
-		if err != nil {
-			log.Errorf("rproxy listener close err: %s, routine continued", err)
+// CloseListener stops accepting new connections without canceling the context
+// or closing established pipes. It is safe to call concurrently and repeatedly.
+// A closed listener cannot be reopened; create a new RProxy for another window.
+func (rproxy *RProxy) CloseListener() error {
+	rproxy.listenerCloseOnce.Do(func() {
+		if rproxy.listener != nil {
+			err := rproxy.listener.Close()
+			if !errors.Is(err, net.ErrClosed) {
+				rproxy.listenerCloseErr = err
+			}
 		}
+	})
+	return rproxy.listenerCloseErr
+}
+
+// Close preserves the original listener-only shutdown behavior.
+func (rproxy *RProxy) Close() {
+	if err := rproxy.CloseListener(); err != nil {
+		log.Errorf("rproxy listener close err: %s, routine continued", err)
 	}
 }
 
