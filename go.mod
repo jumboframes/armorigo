@@ -3,7 +3,7 @@ module github.com/jumboframes/armorigo
 go 1.18
 
 require (
-	github.com/singchia/go-timer/v2 v2.2.1
+	github.com/singchia/go-timer/v2 v2.2.2
 	github.com/stretchr/testify v1.8.4
 	k8s.io/klog/v2 v2.120.1
 )
